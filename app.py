@@ -6,7 +6,7 @@ from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from pyrogram.handlers import MessageHandler
 from dotenv import load_dotenv
 from questions import get_random_question, check_answer
-from database import get_db_connection, init_db
+from database import Database
 
 # Load environment variables
 load_dotenv()
@@ -58,6 +58,8 @@ class SuperFamily100Bot:
         self.blacklisted_groups = set()
         self.group_in_game = set()
         self.game_timers = {}
+        self.current_questions = {}
+        self.user_in_game = {}
 
         # Add handlers
         self.app.add_handler(MessageHandler(self.start, filters.command("start")))
@@ -71,7 +73,7 @@ class SuperFamily100Bot:
         self.app.add_handler(MessageHandler(self.peraturan, filters.command("peraturan")))
         self.app.add_handler(MessageHandler(self.blacklist, filters.command("blacklist")))
         self.app.add_handler(MessageHandler(self.whitelist, filters.command("whitelist")))
-        self.app.add_handler(MessageHandler(self.handle_answer, filters.text & filters.private))
+        self.app.add_handler(MessageHandler(self.handle_answer, filters.text & filters.group))
 
     async def start(self, client, message):
         user_fullname = message.from_user.first_name
@@ -83,7 +85,7 @@ class SuperFamily100Bot:
             await self.start_game(client, message)
         else:
             # Normal command /start, send welcome message and instructions
-            await message.reply_text(
+            welcome_text = (
                 f"Halo {user_fullname}, ayo kita main Super Family 100.\n"
                 "/play : mulai game\n"
                 "/nyerah : menyerah dari game\n"
@@ -92,9 +94,12 @@ class SuperFamily100Bot:
                 "/stats : melihat statistik kamu\n"
                 "/top : lihat top skor global\n"
                 "/topgrup : lihat top skor grup\n"
-                "/peraturan : aturan bermain\n\n"
-                "Klik /start setelah memasukkan bot ini ke grup untuk memulai permainan."
+                "/peraturan : aturan bermain"
             )
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("Invite ke group +", url="https://t.me/Pintar100_bot")]
+            ])
+            await message.reply_text(welcome_text, reply_markup=keyboard)
 
     async def bantuan(self, client, message):
         await message.reply_text(
@@ -114,44 +119,63 @@ class SuperFamily100Bot:
             return
 
         chat_id = message.chat.id
-        if chat_id in self.group_in_game:
-            await message.reply_text("Permainan sudah dimulai di grup ini.")
+        user_id = message.from_user.id
+
+        if chat_id in self.group_in_game and user_id in self.user_in_game.get(chat_id, set()):
+            await message.reply_text("Permainan sudah dimulai untuk Anda di grup ini.")
             return
 
         await self.start_game(client, message)
 
     async def start_game(self, client, message):
+        chat_id = message.chat.id
+        user_id = message.from_user.id
+
+        if chat_id not in self.user_in_game:
+            self.user_in_game[chat_id] = set()
+        self.user_in_game[chat_id].add(user_id)
+
         question, answers = get_random_question()
         correct_answers = ["_" * len(ans) for ans, _ in answers]
 
-        client.current_question = question
-        client.correct_answers = correct_answers
-        client.all_answers = answers
+        if chat_id not in self.current_questions:
+            self.current_questions[chat_id] = {}
+
+        self.current_questions[chat_id][user_id] = {
+            "question": question,
+            "answers": answers,
+            "correct_answers": correct_answers
+        }
 
         formatted_question = self.format_question(question, correct_answers)
         await message.reply_text(formatted_question)
-        self.group_in_game.add(message.chat.id)
+        self.group_in_game.add(chat_id)
 
-        # Set game timer for 1 minute
-        self.game_timers[message.chat.id] = asyncio.get_running_loop().call_later(60, self.next_game_question, client, message.chat.id)
+        # Set game timer for 1 minute for the user
+        if chat_id not in self.game_timers:
+            self.game_timers[chat_id] = {}
+        self.game_timers[chat_id][user_id] = asyncio.get_running_loop().call_later(60, self.next_game_question, client, chat_id, user_id)
 
         # Example database operation
-        with get_db_connection() as conn:
-            cursor = conn.cursor()
-            cursor.execute("INSERT INTO groups (id) VALUES (?)", (message.chat.id,))
-            conn.commit()
+        db = Database('family100.db')
+        db.update_score(chat_id, message.from_user.username, 0)
+        db.close()
 
-    async def next_game_question(self, client, chat_id):
-        await client.send_message(chat_id, "/next")
+    async def next_game_question(self, client, chat_id, user_id):
+        await client.send_message(chat_id, f"/next {user_id}")
 
     async def handle_answer(self, client, message):
-        if not hasattr(client, 'current_question'):
+        chat_id = message.chat.id
+        user_id = message.from_user.id
+
+        if chat_id not in self.current_questions or user_id not in self.current_questions[chat_id]:
             return
 
         user_answer = message.text.strip()
-        question = client.current_question
-        correct_answers = client.correct_answers
-        all_answers = client.all_answers
+        current_question = self.current_questions[chat_id][user_id]
+        question = current_question["question"]
+        correct_answers = current_question["correct_answers"]
+        all_answers = current_question["answers"]
 
         index, points = check_answer(question, user_answer)
 
@@ -166,7 +190,6 @@ class SuperFamily100Bot:
                 self.user_scores[user_name] = 0
             self.user_scores[user_name] += points
 
-            chat_id = message.chat.id
             if chat_id not in self.group_scores:
                 self.group_scores[chat_id] = {}
             if user_name not in self.group_scores[chat_id]:
@@ -175,30 +198,53 @@ class SuperFamily100Bot:
 
             if all(ans != "_" * len(ans) for ans in correct_answers):
                 await message.reply_text("Pertanyaan telah selesai! Gunakan /next untuk pertanyaan berikutnya.")
-                del client.current_question
-                del client.correct_answers
-                del client.all_answers
+                del self.current_questions[chat_id][user_id]
 
-                # Cancel game timer for this group
-                if chat_id in self.game_timers:
-                    self.game_timers[chat_id].cancel()
-                    del self.game_timers[chat_id]
+                # Cancel game timer for this user
+                if chat_id in self.game_timers and user_id in self.game_timers[chat_id]:
+                    self.game_timers[chat_id][user_id].cancel()
+                    del self.game_timers[chat_id][user_id]
+
+                self.user_in_game[chat_id].discard(user_id)
+        else:
+            await message.reply_text(f"Jawaban salah! Coba lagi.\n{self.format_question(question, correct_answers)}")
 
     async def nyerah(self, client, message):
-        if hasattr(client, 'current_question'):
-            del client.current_question
-            del client.correct_answers
-            del client.all_answers
+        chat_id = message.chat.id
+        user_id = message.from_user.id
 
-            chat_id = message.chat.id
-            if chat_id in self.game_timers:
-                self.game_timers[chat_id].cancel()
-                del self.game_timers[chat_id]
+        if chat_id in self.current_questions and user_id in self.current_questions[chat_id]:
+            del self.current_questions[chat_id][user_id]
 
-            await message.reply_text("Anda menyerah. Game dihentikan.")
+            if chat_id in self.game_timers and user_id in self.game_timers[chat_id]:
+                self.game_timers[chat_id][user_id].cancel()
+                del self.game_timers[chat_id][user_id]
+
+            self.user_in_game[chat_id].discard(user_id)
+            await message.reply_text("Anda menyerah. Game Anda dihentikan.")
+        else:
+            await message.reply_text("Tidak ada permainan yang sedang berlangsung untuk Anda.")
 
     async def next(self, client, message):
-        await self.start_game(client, message)
+        chat_id = message.chat.id
+        user_id = message.from_user.id
+
+        if chat_id in self.current_questions:
+            if user_id in self.current_questions[chat_id]:
+                del self.current_questions[chat_id][user_id]
+
+                if chat_id in self.game_timers and user_id in self.game_timers[chat_id]:
+                    self.game_timers[chat_id][user_id].cancel()
+                    del self.game_timers[chat_id][user_id]
+
+                self.user_in_game[chat_id].discard(user_id)
+
+                # Start a new game
+                await self.start_game(client, message)
+            else:
+                await message.reply_text("Tidak ada permainan yang sedang berlangsung untuk Anda.")
+        else:
+            await message.reply_text("Tidak ada permainan yang sedang berlangsung.")
 
     async def stats(self, client, message):
         user_id = message.from_user.id
@@ -222,70 +268,59 @@ class SuperFamily100Bot:
 
     async def top(self, client, message):
         sorted_users = sorted(self.user_scores.items(), key=lambda x: x[1], reverse=True)
-        top_list = "\n".join(f"{self.get_rank_emoji(rank)} {username} - {user_id} - ({score})🏆" for rank, ((username, user_id), score) in enumerate(sorted_users[:10], start=1))
-        await message.reply_text(f"🏆 Top Player Global:\n{top_list}")
+        top_users = "\n".join([f"{i + 1}. {username}: {score}" for i, (username, score) in enumerate(sorted_users[:10])])
+        await message.reply_text(f"🏅 Top 10 Pemain:\n\n{top_users}")
 
     async def topgrup(self, client, message):
         sorted_groups = sorted(self.group_scores.items(), key=lambda x: sum(x[1].values()), reverse=True)
-        top_list = "\n".join(f"{self.get_rank_emoji(rank)} {self.get_group_name(chat_id)} - {self.get_group_link(chat_id)} - ({sum(scores.values())})🏆" for rank, (chat_id, scores) in enumerate(sorted_groups[:10], start=1))
-        await message.reply_text(f"🏆 Top Group Global:\n{top_list}")
+        top_groups = ""
+        for i, (group_id, users_scores) in enumerate(sorted_groups[:10]):
+            group_score = sum(users_scores.values())
+            top_groups += f"{i + 1}. Group ID {group_id}: {group_score}\n"
+            top_users = "\n".join([f"    {username}: {score}" for username, score in users_scores.items()])
+            top_groups += top_users + "\n"
+        
+        await message.reply_text(f"🏅 Top 10 Grup:\n\n{top_groups}")
 
     async def peraturan(self, client, message):
-        rules = """
-        1. Jaga kekompakan dan persatuan keluarga.
-        2. Dilarang membuat masalah.
-        3. Dilarang menyinggung perasaan.
-        4. Jika ada yg menyinggung perasaan maka harus meminta maaf
-        5. Selalu menghargai anggota yg lain.
-        """
-        await message.reply_text(rules)
+        await message.reply_text(
+            "📜 Peraturan Permainan Super Family 100:\n\n"
+            "1. Setiap pertanyaan memiliki beberapa jawaban yang benar.\n"
+            "2. Ketik jawaban Anda. Jika benar, poin akan diberikan.\n"
+            "3. Anda bisa menyerah dengan mengetik /nyerah.\n"
+            "4. Gunakan /next untuk pertanyaan berikutnya setelah pertanyaan selesai.\n"
+            "5. Nikmati permainan dan jangan lupa bersenang-senang!"
+        )
 
     async def blacklist(self, client, message):
-        if message.from_user.id == OWNER_ID:
-            if message.reply_to_message:
-                user_id = message.reply_to_message.from_user.id
-                self.blacklisted_users.add(user_id)
-                await message.reply_text("User telah berhasil dimasukkan dalam daftar hitam.")
-            else:
-                await message.reply_text("Balas pesan pengguna untuk memasukkan dalam daftar hitam.")
-        else:
-            await message.reply_text("Anda tidak memiliki izin untuk menjalankan perintah ini.")
+        if str(message.from_user.id) != OWNER_ID:
+            await message.reply_text("Hanya pemilik bot yang dapat mengakses perintah ini.")
+            return
+
+        if len(message.command) != 2:
+            await message.reply_text("Gunakan format: /blacklist <user_id>")
+            return
+
+        user_id = int(message.command[1])
+        self.blacklisted_users.add(user_id)
+        await message.reply_text(f"Pengguna {user_id} telah di-blacklist.")
 
     async def whitelist(self, client, message):
-        if message.from_user.id == OWNER_ID:
-            if message.reply_to_message:
-                user_id = message.reply_to_message.from_user.id
-                if user_id in self.blacklisted_users:
-                    self.blacklisted_users.remove(user_id)
-                    await message.reply_text("User telah berhasil dihapus dari daftar hitam.")
-                else:
-                    await message.reply_text("User tidak ada dalam daftar hitam.")
-            else:
-                await message.reply_text("Balas pesan pengguna untuk menghapus dari daftar hitam.")
-        else:
-            await message.reply_text("Anda tidak memiliki izin untuk menjalankan perintah ini.")
+        if str(message.from_user.id) != OWNER_ID:
+            await message.reply_text("Hanya pemilik bot yang dapat mengakses perintah ini.")
+            return
+
+        if len(message.command) != 2:
+            await message.reply_text("Gunakan format: /whitelist <user_id>")
+            return
+
+        user_id = int(message.command[1])
+        self.blacklisted_users.discard(user_id)
+        await message.reply_text(f"Pengguna {user_id} telah di-whitelist.")
 
     def format_question(self, question, correct_answers):
-        formatted_question = f"{question}\n\nJawaban: {' atau '.join(correct_answers)}"
-        return formatted_question
-
-    def get_rank_emoji(self, rank):
-        if rank == 1:
-            return "🥇"
-        elif rank == 2:
-            return "🥈"
-        elif rank == 3:
-            return "🥉"
-        else:
-            return f"{rank}. "
-
-    def get_group_name(self, chat_id):
-        # Placeholder function, replace with actual logic to get group name based on chat_id
-        return f"Group-{chat_id}"
-
-    def get_group_link(self, chat_id):
-        # Placeholder function, replace with actual logic to get group link based on chat_id
-        return f"@group{chat_id}"
+        formatted_answers = "\n".join([f"{i + 1}. {ans}" for i, ans in enumerate(correct_answers)])
+        return f"{question}\n\n{formatted_answers}"
 
     def run(self):
         self.app.run()
