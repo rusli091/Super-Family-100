@@ -239,7 +239,6 @@ class SuperFamily100Bot:
 
                 self.user_in_game[chat_id].discard(user_id)
 
-                # Start a new game
                 await self.start_game(client, message)
             else:
                 await message.reply_text("Tidak ada permainan yang sedang berlangsung untuk Anda.")
@@ -267,62 +266,58 @@ class SuperFamily100Bot:
         )
 
     async def top(self, client, message):
-        sorted_users = sorted(self.user_scores.items(), key=lambda x: x[1], reverse=True)
-        top_users = "\n".join([f"{i + 1}. {username}: {score}" for i, (username, score) in enumerate(sorted_users[:10])])
-        await message.reply_text(f"🏅 Top 10 Pemain:\n\n{top_users}")
+        sorted_users = sorted(self.user_scores.items(), key=lambda x: x[1], reverse=True)[:10]
+        top_scores = [f"{i+1}. {username}: {score}" for i, (username, score) in enumerate(sorted_users)]
+        await message.reply_text("🏆 Top 10 Skor Global:\n" + "\n".join(top_scores))
 
     async def topgrup(self, client, message):
-        sorted_groups = sorted(self.group_scores.items(), key=lambda x: sum(x[1].values()), reverse=True)
-        top_groups = ""
-        for i, (group_id, users_scores) in enumerate(sorted_groups[:10]):
-            group_score = sum(users_scores.values())
-            top_groups += f"{i + 1}. Group ID {group_id}: {group_score}\n"
-            top_users = "\n".join([f"    {username}: {score}" for username, score in users_scores.items()])
-            top_groups += top_users + "\n"
-        
-        await message.reply_text(f"🏅 Top 10 Grup:\n\n{top_groups}")
+        chat_id = message.chat.id
+
+        if chat_id not in self.group_scores:
+            await message.reply_text("Belum ada skor di grup ini.")
+            return
+
+        sorted_users = sorted(self.group_scores[chat_id].items(), key=lambda x: x[1], reverse=True)[:10]
+        top_scores = [f"{i+1}. {username}: {score}" for i, (username, score) in enumerate(sorted_users)]
+        await message.reply_text("🏆 Top 10 Skor Grup:\n" + "\n".join(top_scores))
 
     async def peraturan(self, client, message):
         await message.reply_text(
-            "📜 Peraturan Permainan Super Family 100:\n\n"
-            "1. Setiap pertanyaan memiliki beberapa jawaban yang benar.\n"
-            "2. Ketik jawaban Anda. Jika benar, poin akan diberikan.\n"
-            "3. Anda bisa menyerah dengan mengetik /nyerah.\n"
-            "4. Gunakan /next untuk pertanyaan berikutnya setelah pertanyaan selesai.\n"
-            "5. Nikmati permainan dan jangan lupa bersenang-senang!"
+            "📜 Peraturan Main Super Family 100 📜\n\n"
+            "1. Ketik /play untuk mulai permainan.\n"
+            "2. Jawab pertanyaan dengan mengetikkan jawaban Anda.\n"
+            "3. Anda memiliki waktu 60 detik untuk menjawab setiap pertanyaan.\n"
+            "4. Gunakan /nyerah jika ingin menyerah dari permainan.\n"
+            "5. Gunakan /next untuk pertanyaan berikutnya setelah pertanyaan saat ini selesai.\n"
+            "6. Jangan curang, bersikap sportif.\n"
+            "7. Selamat bersenang-senang!"
         )
 
     async def blacklist(self, client, message):
-        if str(message.from_user.id) != OWNER_ID:
-            await message.reply_text("Hanya pemilik bot yang dapat mengakses perintah ini.")
+        if message.from_user.id not in ADMINS:
+            await message.reply_text("Hanya admin yang bisa menggunakan perintah ini.")
             return
 
-        if len(message.command) != 2:
-            await message.reply_text("Gunakan format: /blacklist <user_id>")
-            return
-
-        user_id = int(message.command[1])
-        self.blacklisted_users.add(user_id)
-        await message.reply_text(f"Pengguna {user_id} telah di-blacklist.")
+        target_id = int(message.command[1])
+        self.blacklisted_users.add(target_id)
+        await message.reply_text(f"Pengguna {target_id} telah di-blacklist.")
 
     async def whitelist(self, client, message):
-        if str(message.from_user.id) != OWNER_ID:
-            await message.reply_text("Hanya pemilik bot yang dapat mengakses perintah ini.")
+        if message.from_user.id not in ADMINS:
+            await message.reply_text("Hanya admin yang bisa menggunakan perintah ini.")
             return
 
-        if len(message.command) != 2:
-            await message.reply_text("Gunakan format: /whitelist <user_id>")
-            return
-
-        user_id = int(message.command[1])
-        self.blacklisted_users.discard(user_id)
-        await message.reply_text(f"Pengguna {user_id} telah di-whitelist.")
+        target_id = int(message.command[1])
+        self.blacklisted_users.discard(target_id)
+        await message.reply_text(f"Pengguna {target_id} telah di-whitelist.")
 
     def format_question(self, question, correct_answers):
-        formatted_answers = "\n".join([f"{i + 1}. {ans}" for i, ans in enumerate(correct_answers)])
-        return f"{question}\n\n{formatted_answers}"
+        answer_lines = [f"{i+1}. {answer}" for i, answer in enumerate(correct_answers)]
+        formatted_question = f"{question}\n\n" + "\n".join(answer_lines)
+        return formatted_question
 
     def run(self):
+        print("Bot is running...")
         self.app.run()
 
 if __name__ == "__main__":
