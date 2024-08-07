@@ -7,6 +7,7 @@ from pyrogram.handlers import MessageHandler
 from dotenv import load_dotenv
 from questions import get_random_question, check_answer
 from database import Database
+from rate_limiter import RateLimiter  # Import RateLimiter
 
 # Load environment variables
 load_dotenv()
@@ -69,6 +70,9 @@ class SuperFamily100Bot:
             'user_in_game': asyncio.Lock()
         }
 
+        # Initialize rate limiter
+        self.rate_limiter = RateLimiter(rate_limit=5, time_window=60)  # 5 requests per minute
+
         # Add handlers
         self.app.add_handler(MessageHandler(self.start, filters.command("start")))
         self.app.add_handler(MessageHandler(self.bantuan, filters.command("help")))
@@ -84,10 +88,15 @@ class SuperFamily100Bot:
         self.app.add_handler(MessageHandler(self.handle_answer, filters.text & filters.group))
 
     async def rate_limited(self, user_id):
-        # Implement rate limiting logic here
+        if self.rate_limiter.is_rate_limited(user_id):
+            await self.app.send_message(user_id, "Anda terlalu sering menggunakan perintah ini. Silakan coba lagi nanti.")
+            return True
         return False
 
     async def start(self, client, message):
+        if await self.rate_limited(message.from_user.id):
+            return
+
         user_fullname = message.from_user.first_name
         user_id = message.from_user.id
 
@@ -111,6 +120,9 @@ class SuperFamily100Bot:
             await message.reply_text(welcome_text, reply_markup=keyboard)
 
     async def bantuan(self, client, message):
+        if await self.rate_limited(message.from_user.id):
+            return
+
         await message.reply_text(
             "/mulai : mulai game\n"
             "/nyerah : menyerah dari game\n"
@@ -196,28 +208,33 @@ class SuperFamily100Bot:
                 correct_answers = current_question["correct_answers"]
                 all_answers = current_question["answers"]
 
-                index, points = check_answer(question, user_answer)
+                if check_answer(user_answer, all_answers):
+                    for i, (answer, points) in enumerate(all_answers):
+                        if answer.lower() == user_answer.lower():
+                            correct_answers[i] = answer
+                            break
 
-                if index != -1:
-                    correct_answers[index] = all_answers[index][0]
-                    formatted_question = self.format_question(question, correct_answers)
+                    await message.reply_text(
+                        f"✅ Jawaban benar: {user_answer} ({points} poin)"
+                    )
 
-                    await message.reply_text(f"{message.from_user.first_name} menjawab benar! Poin: {points}\n{formatted_question}")
-
-                    user_name = message.from_user.username
                     async with self.locks['user_scores']:
-                        if user_name not in self.user_scores:
-                            self.user_scores[user_name] = 0
-                        self.user_scores[user_name] += points
+                        if message.from_user.username not in self.user_scores:
+                            self.user_scores[message.from_user.username] = 0
+                        self.user_scores[message.from_user.username] += points
 
                     async with self.locks['group_scores']:
                         if chat_id not in self.group_scores:
                             self.group_scores[chat_id] = {}
-                        if user_name not in self.group_scores[chat_id]:
-                            self.group_scores[chat_id][user_name] = 0
-                        self.group_scores[chat_id][user_name] += points
+                        if message.from_user.username not in self.group_scores[chat_id]:
+                            self.group_scores[chat_id][message.from_user.username] = 0
+                        self.group_scores[chat_id][message.from_user.username] += points
 
-                    if all(ans != "_" * len(ans) for ans in correct_answers):
+                    db = Database('family100.db')
+                    db.update_score(chat_id, message.from_user.username, points)
+                    db.close()
+
+                    if all("_" not in ans for ans in correct_answers):
                         await message.reply_text("Semua jawaban sudah ditemukan. Gunakan /next untuk pertanyaan berikutnya.")
                         del self.current_questions[chat_id][uid]
 
@@ -230,39 +247,43 @@ class SuperFamily100Bot:
                                 del self.game_timers[chat_id][uid]
 
     async def nyerah(self, client, message):
-        if await self.rate_limited(message.from_user.id):
-            return
+    if await self.rate_limited(message.from_user.id):
+        return
 
-        chat_id = message.chat.id
-        user_id = message.from_user.id
+    chat_id = message.chat.id
+    user_id = message.from_user.id
 
-        async with self.locks['current_questions']:
-            if chat_id in self.current_questions and user_id in self.current_questions[chat_id]:
-                del self.current_questions[chat_id][user_id]
+    async with self.locks['current_questions']:
+        if chat_id in self.current_questions and user_id in self.current_questions[chat_id]:
+            del self.current_questions[chat_id][user_id]
 
-        async with self.locks['user_in_game']:
-            if chat_id in self.user_in_game and user_id in self.user_in_game[chat_id]:
-                self.user_in_game[chat_id].discard(user_id)
+            async with self.locks['game_timers']:
+                if chat_id in self.game_timers and user_id in self.game_timers[chat_id]:
+                    self.game_timers[chat_id][user_id].cancel()
+                    del self.game_timers[chat_id][user_id]
 
-        async with self.locks['game_timers']:
-            if chat_id in self.game_timers and user_id in self.game_timers[chat_id]:
-                self.game_timers[chat_id][user_id].cancel()
-                del self.game_timers[chat_id][user_id]
+            self.user_in_game[chat_id].discard(user_id)
+            await message.reply_text("Anda menyerah. Game Anda dihentikan.")
 
-        await message.reply_text("Anda telah menyerah. Gunakan /mulai untuk memulai permainan baru.")
+async def next(self, client, message):
+    if await self.rate_limited(message.from_user.id):
+        return
 
-    async def next(self, client, message):
-        if await self.rate_limited(message.from_user.id):
-            return
+    chat_id = message.chat.id
+    user_id = message.from_user.id
 
-        chat_id = message.chat.id
-        user_id = message.from_user.id
+    async with self.locks['current_questions']:
+        if chat_id in self.current_questions and user_id in self.current_questions[chat_id]:
+            del self.current_questions[chat_id][user_id]
 
-        if user_id not in self.user_in_game.get(chat_id, set()):
-            await message.reply_text("Tidak ada permainan yang sedang berlangsung untuk Anda.")
-            return
+            async with self.locks['game_timers']:
+                if chat_id in self.game_timers and user_id in self.game_timers[chat_id]:
+                    self.game_timers[chat_id][user_id].cancel()
+                    del self.game_timers[chat_id][user_id]
 
-        await self.start_game(client, message)
+            self.user_in_game[chat_id].discard(user_id)
+
+    await self.start_game(client, message)
 
     async def stats(self, client, message):
         user_id = message.from_user.id
