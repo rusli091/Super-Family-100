@@ -61,6 +61,14 @@ class SuperFamily100Bot:
         self.current_questions = {}
         self.user_in_game = {}
 
+        self.locks = {
+            'user_scores': asyncio.Lock(),
+            'group_scores': asyncio.Lock(),
+            'current_questions': asyncio.Lock(),
+            'game_timers': asyncio.Lock(),
+            'user_in_game': asyncio.Lock()
+        }
+
         # Add handlers
         self.app.add_handler(MessageHandler(self.start, filters.command("start")))
         self.app.add_handler(MessageHandler(self.bantuan, filters.command("help")))
@@ -135,29 +143,33 @@ class SuperFamily100Bot:
         chat_id = message.chat.id
         user_id = message.from_user.id
 
-        if chat_id not in self.user_in_game:
-            self.user_in_game[chat_id] = set()
-        self.user_in_game[chat_id].add(user_id)
+        async with self.locks['user_in_game']:
+            if chat_id not in self.user_in_game:
+                self.user_in_game[chat_id] = set()
+            self.user_in_game[chat_id].add(user_id)
 
         question, answers = get_random_question()
         correct_answers = ["_" * len(ans) for ans, _ in answers]
 
-        if chat_id not in self.current_questions:
-            self.current_questions[chat_id] = {}
-
-        self.current_questions[chat_id][user_id] = {
-            "question": question,
-            "answers": answers,
-            "correct_answers": correct_answers
-        }
+        async with self.locks['current_questions']:
+            if chat_id not in self.current_questions:
+                self.current_questions[chat_id] = {}
+            self.current_questions[chat_id][user_id] = {
+                "question": question,
+                "answers": answers,
+                "correct_answers": correct_answers
+            }
 
         formatted_question = self.format_question(question, correct_answers)
         await message.reply_text(formatted_question)
-        self.group_in_game.add(chat_id)
 
-        if chat_id not in self.game_timers:
-            self.game_timers[chat_id] = {}
-        self.game_timers[chat_id][user_id] = asyncio.get_running_loop().call_later(60, self.next_game_question, client, chat_id, user_id)
+        async with self.locks['group_in_game']:
+            self.group_in_game.add(chat_id)
+
+        async with self.locks['game_timers']:
+            if chat_id not in self.game_timers:
+                self.game_timers[chat_id] = {}
+            self.game_timers[chat_id][user_id] = asyncio.get_running_loop().call_later(60, self.next_game_question, client, chat_id, user_id)
 
         db = Database('family100.db')
         db.update_score(chat_id, message.from_user.username, 0)
@@ -173,44 +185,49 @@ class SuperFamily100Bot:
         chat_id = message.chat.id
         user_id = message.from_user.id
 
-        if chat_id not in self.current_questions:
-            return
+        async with self.locks['current_questions']:
+            if chat_id not in self.current_questions:
+                return
 
-        user_answer = message.text.strip()
-        for uid in list(self.current_questions[chat_id].keys()):
-            current_question = self.current_questions[chat_id][uid]
-            question = current_question["question"]
-            correct_answers = current_question["correct_answers"]
-            all_answers = current_question["answers"]
+            user_answer = message.text.strip()
+            for uid in list(self.current_questions[chat_id].keys()):
+                current_question = self.current_questions[chat_id][uid]
+                question = current_question["question"]
+                correct_answers = current_question["correct_answers"]
+                all_answers = current_question["answers"]
 
-            index, points = check_answer(question, user_answer)
+                index, points = check_answer(question, user_answer)
 
-            if index != -1:
-                correct_answers[index] = all_answers[index][0]
-                formatted_question = self.format_question(question, correct_answers)
+                if index != -1:
+                    correct_answers[index] = all_answers[index][0]
+                    formatted_question = self.format_question(question, correct_answers)
 
-                await message.reply_text(f"{message.from_user.first_name} menjawab benar! Poin: {points}\n{formatted_question}")
+                    await message.reply_text(f"{message.from_user.first_name} menjawab benar! Poin: {points}\n{formatted_question}")
 
-                user_name = message.from_user.username
-                if user_name not in self.user_scores:
-                    self.user_scores[user_name] = 0
-                self.user_scores[user_name] += points
+                    user_name = message.from_user.username
+                    async with self.locks['user_scores']:
+                        if user_name not in self.user_scores:
+                            self.user_scores[user_name] = 0
+                        self.user_scores[user_name] += points
 
-                if chat_id not in self.group_scores:
-                    self.group_scores[chat_id] = {}
-                if user_name not in self.group_scores[chat_id]:
-                    self.group_scores[chat_id][user_name] = 0
-                self.group_scores[chat_id][user_name] += points
+                    async with self.locks['group_scores']:
+                        if chat_id not in self.group_scores:
+                            self.group_scores[chat_id] = {}
+                        if user_name not in self.group_scores[chat_id]:
+                            self.group_scores[chat_id][user_name] = 0
+                        self.group_scores[chat_id][user_name] += points
 
-                if all(ans != "_" * len(ans) for ans in correct_answers):
-                    await message.reply_text("Pertanyaan telah selesai! Gunakan /next untuk pertanyaan berikutnya.")
-                    del self.current_questions[chat_id][uid]
+                    if all(ans != "_" * len(ans) for ans in correct_answers):
+                        await message.reply_text("Semua jawaban sudah ditemukan. Gunakan /next untuk pertanyaan berikutnya.")
+                        del self.current_questions[chat_id][uid]
 
-                    if chat_id in self.game_timers and uid in self.game_timers[chat_id]:
-                        self.game_timers[chat_id][uid].cancel()
-                        del self.game_timers[chat_id][uid]
+                        async with self.locks['user_in_game']:
+                            self.user_in_game[chat_id].discard(uid)
 
-                    self.user_in_game[chat_id].discard(uid)
+                        async with self.locks['game_timers']:
+                            if uid in self.game_timers[chat_id]:
+                                self.game_timers[chat_id][uid].cancel()
+                                del self.game_timers[chat_id][uid]
 
     async def nyerah(self, client, message):
         if await self.rate_limited(message.from_user.id):
@@ -219,17 +236,20 @@ class SuperFamily100Bot:
         chat_id = message.chat.id
         user_id = message.from_user.id
 
-        if chat_id in self.current_questions and user_id in self.current_questions[chat_id]:
-            del self.current_questions[chat_id][user_id]
+        async with self.locks['current_questions']:
+            if chat_id in self.current_questions and user_id in self.current_questions[chat_id]:
+                del self.current_questions[chat_id][user_id]
 
+        async with self.locks['user_in_game']:
+            if chat_id in self.user_in_game and user_id in self.user_in_game[chat_id]:
+                self.user_in_game[chat_id].discard(user_id)
+
+        async with self.locks['game_timers']:
             if chat_id in self.game_timers and user_id in self.game_timers[chat_id]:
                 self.game_timers[chat_id][user_id].cancel()
                 del self.game_timers[chat_id][user_id]
 
-            self.user_in_game[chat_id].discard(user_id)
-            await message.reply_text("Anda menyerah. Game Anda dihentikan.")
-        else:
-            await message.reply_text("Tidak ada permainan yang sedang berlangsung untuk Anda.")
+        await message.reply_text("Anda telah menyerah. Gunakan /mulai untuk memulai permainan baru.")
 
     async def next(self, client, message):
         if await self.rate_limited(message.from_user.id):
@@ -238,15 +258,9 @@ class SuperFamily100Bot:
         chat_id = message.chat.id
         user_id = message.from_user.id
 
-        if chat_id in self.current_questions:
-            if user_id in self.current_questions[chat_id]:
-                del self.current_questions[chat_id][user_id]
-
-                if chat_id in self.game_timers and user_id in self.game_timers[chat_id]:
-                    self.game_timers[chat_id][user_id].cancel()
-                    del self.game_timers[chat_id][user_id]
-
-                self.user_in_game[chat_id].discard(user_id)
+        if user_id not in self.user_in_game.get(chat_id, set()):
+            await message.reply_text("Tidak ada permainan yang sedang berlangsung untuk Anda.")
+            return
 
         await self.start_game(client, message)
 
@@ -254,13 +268,9 @@ class SuperFamily100Bot:
         user_id = message.from_user.id
         user_name = message.from_user.username
 
-        if user_name in self.user_scores:
-            user_score = self.user_scores[user_name]
-        else:
-            user_score = 0
-
-        sorted_users = sorted(self.user_scores.items(), key=lambda x: x[1], reverse=True)
-        global_rank = next((i + 1 for i, (username, _) in enumerate(sorted_users) if username == user_name), 'N/A')
+        async with self.locks['user_scores']:
+            user_score = self.user_scores.get(user_name, 0)
+            global_rank = sorted(self.user_scores.items(), key=lambda item: item[1], reverse=True).index((user_name, user_score)) + 1
 
         await message.reply_text(
             f"📊 Statistik Anda:\n\n"
@@ -271,60 +281,73 @@ class SuperFamily100Bot:
         )
 
     async def top(self, client, message):
-        sorted_users = sorted(self.user_scores.items(), key=lambda x: x[1], reverse=True)
-        top_users = "\n".join([f"{i + 1}. {username}: {score}" for i, (username, score) in enumerate(sorted_users[:10])])
-        await message.reply_text(f"🏅 Top 10 Pemain:\n\n{top_users}")
+        async with self.locks['user_scores']:
+            top_users = sorted(self.user_scores.items(), key=lambda item: item[1], reverse=True)[:10]
+
+        top_text = "Top 10 Pemain:\n" + "\n".join([f"{i+1}. {user}: {score}" for i, (user, score) in enumerate(top_users)])
+        await message.reply_text(top_text)
 
     async def topgrup(self, client, message):
-        sorted_groups = sorted(self.group_scores.items(), key=lambda x: sum(x[1].values()), reverse=True)
-        top_groups = ""
-        for i, (group_id, users_scores) in enumerate(sorted_groups[:10]):
-            group_score = sum(users_scores.values())
-            top_groups += f"{i + 1}. Group ID {group_id}: {group_score}\n"
-            top_users = "\n".join([f"    {username}: {score}" for username, score in users_scores.items()])
-            top_groups += top_users + "\n"
-        
-        await message.reply_text(f"🏅 Top 10 Grup:\n\n{top_groups}")
+        chat_id = message.chat.id
+
+        async with self.locks['group_scores']:
+            if chat_id not in self.group_scores:
+                await message.reply_text("Tidak ada skor untuk grup ini.")
+                return
+
+            top_users = sorted(self.group_scores[chat_id].items(), key=lambda item: item[1], reverse=True)[:10]
+
+        top_text = f"Top 10 Pemain di Grup ini:\n" + "\n".join([f"{i+1}. {user}: {score}" for i, (user, score) in enumerate(top_users)])
+        await message.reply_text(top_text)
 
     async def peraturan(self, client, message):
-        await message.reply_text(
-            "📜 Peraturan Permainan Super Family 100:\n\n"
-            "1. Setiap pertanyaan memiliki beberapa jawaban yang benar.\n"
-            "2. Ketik jawaban Anda. Jika benar, poin akan diberikan.\n"
-            "3. Anda bisa menyerah dengan mengetik /nyerah.\n"
-            "4. Gunakan /next untuk pertanyaan berikutnya setelah pertanyaan selesai.\n"
-            "5. Nikmati permainan dan jangan lupa bersenang-senang!"
+        rules_text = (
+            "Aturan Bermain Super Family 100:\n"
+            "1. Mulai permainan dengan /mulai\n"
+            "2. Jawab pertanyaan yang diberikan\n"
+            "3. Dapatkan poin untuk jawaban yang benar\n"
+            "4. Gunakan /next untuk pertanyaan berikutnya\n"
+            "5. Gunakan /nyerah jika ingin menyerah\n"
         )
+        await message.reply_text(rules_text)
 
     async def blacklist(self, client, message):
-        if str(message.from_user.id) != OWNER_ID:
-            await message.reply_text("Hanya pemilik bot yang dapat mengakses perintah ini.")
+        if str(message.from_user.id) != str(OWNER_ID):
             return
 
-        if len(message.command) != 2:
-            await message.reply_text("Gunakan format: /blacklist <user_id>")
+        args = message.text.split()
+        if len(args) < 2:
+            await message.reply_text("Penggunaan: /blacklist <user_id/group_id>")
             return
 
-        user_id = int(message.command[1])
-        self.blacklisted_users.add(user_id)
-        await message.reply_text(f"Pengguna {user_id} telah di-blacklist.")
+        target_id = int(args[1])
+        if target_id < 0:
+            self.blacklisted_groups.add(target_id)
+            await message.reply_text(f"Grup {target_id} telah di-blacklist.")
+        else:
+            self.blacklisted_users.add(target_id)
+            await message.reply_text(f"Pengguna {target_id} telah di-blacklist.")
 
     async def whitelist(self, client, message):
-        if str(message.from_user.id) != OWNER_ID:
-            await message.reply_text("Hanya pemilik bot yang dapat mengakses perintah ini.")
+        if str(message.from_user.id) != str(OWNER_ID):
             return
 
-        if len(message.command) != 2:
-            await message.reply_text("Gunakan format: /whitelist <user_id>")
+        args = message.text.split()
+        if len(args) < 2:
+            await message.reply_text("Penggunaan: /whitelist <user_id/group_id>")
             return
 
-        user_id = int(message.command[1])
-        self.blacklisted_users.discard(user_id)
-        await message.reply_text(f"Pengguna {user_id} telah di-whitelist.")
+        target_id = int(args[1])
+        if target_id < 0:
+            self.blacklisted_groups.discard(target_id)
+            await message.reply_text(f"Grup {target_id} telah di-whitelist.")
+        else:
+            self.blacklisted_users.discard(target_id)
+            await message.reply_text(f"Pengguna {target_id} telah di-whitelist.")
 
     def format_question(self, question, correct_answers):
-        formatted_answers = "\n".join([f"{i + 1}. {ans}" for i, ans in enumerate(correct_answers)])
-        return f"{question}\n\n{formatted_answers}"
+        formatted_question = question + "\n\n" + "\n".join(correct_answers)
+        return formatted_question
 
     def run(self):
         self.app.run()
