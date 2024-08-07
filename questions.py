@@ -1,7 +1,7 @@
 import random
 
 # Daftar pertanyaan dan jawaban
-questions = [
+QUESTIONS = [
     {
         "question": "Apa yang temanmu katakan saat mengumpat?",
         "answers": [("Sial", 1), ("Bodoh", 1), ("Gila", 1), ("Kampret", 1)]
