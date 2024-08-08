@@ -7,7 +7,7 @@ from pyrogram.handlers import MessageHandler
 from dotenv import load_dotenv
 from questions import get_random_question, check_answer
 from database import Database
-from rate_limiter import RateLimiter  # Import RateLimiter
+from rate_limiter import RateLimiter
 
 # Load environment variables
 load_dotenv()
@@ -61,13 +61,15 @@ class SuperFamily100Bot:
         self.game_timers = {}
         self.current_questions = {}
         self.user_in_game = {}
+        self.registered_chats = set()  # Track registered chats for broadcasting
 
         self.locks = {
             'user_scores': asyncio.Lock(),
             'group_scores': asyncio.Lock(),
             'current_questions': asyncio.Lock(),
             'game_timers': asyncio.Lock(),
-            'user_in_game': asyncio.Lock()
+            'user_in_game': asyncio.Lock(),
+            'registered_chats': asyncio.Lock()  # Lock for registered chats
         }
 
         # Initialize rate limiter
@@ -85,6 +87,7 @@ class SuperFamily100Bot:
         self.app.add_handler(MessageHandler(self.peraturan, filters.command("peraturan")))
         self.app.add_handler(MessageHandler(self.blacklist, filters.command("blacklist")))
         self.app.add_handler(MessageHandler(self.whitelist, filters.command("whitelist")))
+        self.app.add_handler(MessageHandler(self.broadcast, filters.command("broadcast") & filters.user(OWNER_ID)))
         self.app.add_handler(MessageHandler(self.handle_answer, filters.text & filters.group))
 
     async def rate_limited(self, user_id):
@@ -99,6 +102,9 @@ class SuperFamily100Bot:
 
         user_fullname = message.from_user.first_name
         user_id = message.from_user.id
+
+        async with self.locks['registered_chats']:
+            self.registered_chats.add(message.chat.id)  # Register chat for broadcasting
 
         if message.reply_to_message and message.reply_to_message.from_user.is_bot:
             await self.start_game(client, message)
@@ -162,6 +168,7 @@ class SuperFamily100Bot:
 
         question, answers = get_random_question()
         correct_answers = ["_" * len(ans) for ans, _ in answers]
+        answerers = [[] for _ in answers]
 
         async with self.locks['current_questions']:
             if chat_id not in self.current_questions:
@@ -169,10 +176,11 @@ class SuperFamily100Bot:
             self.current_questions[chat_id][user_id] = {
                 "question": question,
                 "answers": answers,
-                "correct_answers": correct_answers
+                "correct_answers": correct_answers,
+                "answerers": answerers
             }
 
-        formatted_question = self.format_question(question, correct_answers)
+        formatted_question = self.format_question(question, correct_answers, answerers)
         await message.reply_text(formatted_question)
 
         async with self.locks['group_in_game']:
@@ -196,42 +204,36 @@ class SuperFamily100Bot:
 
         chat_id = message.chat.id
         user_id = message.from_user.id
+        user_name = message.from_user.username
 
         async with self.locks['current_questions']:
             if chat_id not in self.current_questions:
                 return
 
-            user_answer = message.text.strip()
+            user_answer = message.text.strip().lower()
             for uid in list(self.current_questions[chat_id].keys()):
                 current_question = self.current_questions[chat_id][uid]
                 question = current_question["question"]
                 correct_answers = current_question["correct_answers"]
                 all_answers = current_question["answers"]
+                answerers = current_question["answerers"]
 
                 if check_answer(user_answer, all_answers):
                     for i, (answer, points) in enumerate(all_answers):
-                        if answer.lower() == user_answer.lower():
+                        if answer.lower() == user_answer:
                             correct_answers[i] = answer
+                            answerers[i].append(user_name)
                             break
 
                     await message.reply_text(
-                        f"✅ Jawaban benar: {user_answer} ({points} poin)"
+                        f"✅ Jawaban benar: {user_answer} ({points} poin) - {user_name}"
                     )
 
-                    async with self.locks['user_scores']:
-                        if message.from_user.username not in self.user_scores:
-                            self.user_scores[message.from_user.username] = 0
-                        self.user_scores[message.from_user.username] += points
-
-                    async with self.locks['group_scores']:
-                        if chat_id not in self.group_scores:
-                            self.group_scores[chat_id] = {}
-                        if message.from_user.username not in self.group_scores[chat_id]:
-                            self.group_scores[chat_id][message.from_user.username] = 0
-                        self.group_scores[chat_id][message.from_user.username] += points
+                    formatted_question = self.format_question(question, correct_answers, answerers)
+                    await message.reply_text(formatted_question)
 
                     db = Database('family100.db')
-                    db.update_score(chat_id, message.from_user.username, points)
+                    db.update_score(chat_id, user_name, points)
                     db.close()
 
                     if all("_" not in ans for ans in correct_answers):
@@ -247,43 +249,43 @@ class SuperFamily100Bot:
                                 del self.game_timers[chat_id][uid]
 
     async def nyerah(self, client, message):
-    if await self.rate_limited(message.from_user.id):
-        return
+        if await self.rate_limited(message.from_user.id):
+            return
 
-    chat_id = message.chat.id
-    user_id = message.from_user.id
+        chat_id = message.chat.id
+        user_id = message.from_user.id
 
-    async with self.locks['current_questions']:
-        if chat_id in self.current_questions and user_id in self.current_questions[chat_id]:
-            del self.current_questions[chat_id][user_id]
+        async with self.locks['current_questions']:
+            if chat_id in self.current_questions and user_id in self.current_questions[chat_id]:
+                del self.current_questions[chat_id][user_id]
 
-            async with self.locks['game_timers']:
-                if chat_id in self.game_timers and user_id in self.game_timers[chat_id]:
-                    self.game_timers[chat_id][user_id].cancel()
-                    del self.game_timers[chat_id][user_id]
+                async with self.locks['game_timers']:
+                    if chat_id in self.game_timers and user_id in self.game_timers[chat_id]:
+                        self.game_timers[chat_id][user_id].cancel()
+                        del self.game_timers[chat_id][user_id]
 
-            self.user_in_game[chat_id].discard(user_id)
-            await message.reply_text("Anda menyerah. Game Anda dihentikan.")
+                self.user_in_game[chat_id].discard(user_id)
+                await message.reply_text("Anda menyerah. Game Anda dihentikan.")
 
-async def next(self, client, message):
-    if await self.rate_limited(message.from_user.id):
-        return
+    async def next(self, client, message):
+        if await self.rate_limited(message.from_user.id):
+            return
 
-    chat_id = message.chat.id
-    user_id = message.from_user.id
+        chat_id = message.chat.id
+        user_id = message.from_user.id
 
-    async with self.locks['current_questions']:
-        if chat_id in self.current_questions and user_id in self.current_questions[chat_id]:
-            del self.current_questions[chat_id][user_id]
+        async with self.locks['current_questions']:
+            if chat_id in self.current_questions and user_id in self.current_questions[chat_id]:
+                del self.current_questions[chat_id][user_id]
 
-            async with self.locks['game_timers']:
-                if chat_id in self.game_timers and user_id in self.game_timers[chat_id]:
-                    self.game_timers[chat_id][user_id].cancel()
-                    del self.game_timers[chat_id][user_id]
+                async with self.locks['game_timers']:
+                    if chat_id in self.game_timers and user_id in self.game_timers[chat_id]:
+                        self.game_timers[chat_id][user_id].cancel()
+                        del self.game_timers[chat_id][user_id]
 
-            self.user_in_game[chat_id].discard(user_id)
+                self.user_in_game[chat_id].discard(user_id)
 
-    await self.start_game(client, message)
+        await self.start_game(client, message)
 
     async def stats(self, client, message):
         user_id = message.from_user.id
@@ -366,8 +368,29 @@ async def next(self, client, message):
             self.blacklisted_users.discard(target_id)
             await message.reply_text(f"Pengguna {target_id} telah di-whitelist.")
 
-    def format_question(self, question, correct_answers):
-        formatted_question = question + "\n\n" + "\n".join(correct_answers)
+    async def broadcast(self, client, message):
+        if str(message.from_user.id) != str(OWNER_ID):
+            return
+
+        broadcast_message = message.text.split(maxsplit=1)
+        if len(broadcast_message) < 2:
+            await message.reply_text("Penggunaan: /broadcast <pesan>")
+            return
+
+        broadcast_text = broadcast_message[1]
+
+        async with self.locks['registered_chats']:
+            for chat_id in self.registered_chats:
+                try:
+                    await client.send_message(chat_id, broadcast_text)
+                except Exception as e:
+                    logging.error(f"Error broadcasting to {chat_id}: {e}")
+
+        await message.reply_text("Pesan broadcast telah dikirim.")
+
+    def format_question(self, question, correct_answers, answerers):
+        formatted_answers = "\n".join([f"{ans} (Answered by: {', '.join(answers)})" if ans != "_" * len(ans) else ans for ans, answers in zip(correct_answers, answerers)])
+        formatted_question = question + "\n\n" + formatted_answers
         return formatted_question
 
     def run(self):
