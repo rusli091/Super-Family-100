@@ -148,13 +148,6 @@ class SuperFamily100Bot:
             await message.reply_text("Anda atau grup ini telah diblokir dari permainan.")
             return
 
-        chat_id = message.chat.id
-        user_id = message.from_user.id
-
-        if chat_id in self.group_in_game and user_id in self.user_in_game.get(chat_id, set()):
-            await message.reply_text("Permainan sudah dimulai untuk Anda di grup ini.")
-            return
-
         await self.start_game(client, message)
 
     async def start_game(self, client, message):
@@ -244,9 +237,11 @@ class SuperFamily100Bot:
                             self.user_in_game[chat_id].discard(uid)
 
                         async with self.locks['game_timers']:
-                            if uid in self.game_timers[chat_id]:
+                            if chat_id in self.game_timers and uid in self.game_timers[chat_id]:
                                 self.game_timers[chat_id][uid].cancel()
                                 del self.game_timers[chat_id][uid]
+
+                    break
 
     async def nyerah(self, client, message):
         if await self.rate_limited(message.from_user.id):
@@ -255,142 +250,175 @@ class SuperFamily100Bot:
         chat_id = message.chat.id
         user_id = message.from_user.id
 
-        async with self.locks['current_questions']:
-            if chat_id in self.current_questions and user_id in self.current_questions[chat_id]:
-                del self.current_questions[chat_id][user_id]
-
-                async with self.locks['game_timers']:
-                    if chat_id in self.game_timers and user_id in self.game_timers[chat_id]:
-                        self.game_timers[chat_id][user_id].cancel()
-                        del self.game_timers[chat_id][user_id]
-
+        async with self.locks['user_in_game']:
+            if chat_id in self.user_in_game and user_id in self.user_in_game[chat_id]:
                 self.user_in_game[chat_id].discard(user_id)
-                await message.reply_text("Anda menyerah. Game Anda dihentikan.")
+                await message.reply_text(f"Pengguna {message.from_user.first_name} telah menyerah.")
+            else:
+                await message.reply_text("Anda belum memulai permainan.")
 
     async def next(self, client, message):
         if await self.rate_limited(message.from_user.id):
             return
 
+        if len(message.command) > 1:
+            try:
+                user_id = int(message.command[1])
+            except ValueError:
+                await message.reply_text("ID pengguna tidak valid.")
+                return
+        else:
+            user_id = message.from_user.id
+
         chat_id = message.chat.id
-        user_id = message.from_user.id
 
         async with self.locks['current_questions']:
             if chat_id in self.current_questions and user_id in self.current_questions[chat_id]:
                 del self.current_questions[chat_id][user_id]
 
-                async with self.locks['game_timers']:
-                    if chat_id in self.game_timers and user_id in self.game_timers[chat_id]:
-                        self.game_timers[chat_id][user_id].cancel()
-                        del self.game_timers[chat_id][user_id]
-
+        async with self.locks['user_in_game']:
+            if chat_id in self.user_in_game:
                 self.user_in_game[chat_id].discard(user_id)
+
+        async with self.locks['game_timers']:
+            if chat_id in self.game_timers and user_id in self.game_timers[chat_id]:
+                self.game_timers[chat_id][user_id].cancel()
+                del self.game_timers[chat_id][user_id]
 
         await self.start_game(client, message)
 
     async def stats(self, client, message):
-        user_id = message.from_user.id
-        user_name = message.from_user.username
+        if await self.rate_limited(message.from_user.id):
+            return
 
-        async with self.locks['user_scores']:
-            user_score = self.user_scores.get(user_name, 0)
-            global_rank = sorted(self.user_scores.items(), key=lambda item: item[1], reverse=True).index((user_name, user_score)) + 1
+        db = Database('family100.db')
+        score = db.get_user_score(message.chat.id, message.from_user.username)
+        db.close()
 
-        await message.reply_text(
-            f"📊 Statistik Anda:\n\n"
-            f"🆔 ID: {user_id}\n"
-            f"👤 Username: {user_name}\n"
-            f"🏆 Score: {user_score}\n"
-            f"🏅 Rank: {global_rank}\n"
-        )
+        await message.reply_text(f"🏆Statistik Anda:\nNama Pengguna: {message.from_user.username}\nSkor: {score}")
 
     async def top(self, client, message):
-        async with self.locks['user_scores']:
-            top_users = sorted(self.user_scores.items(), key=lambda item: item[1], reverse=True)[:10]
+        if await self.rate_limited(message.from_user.id):
+            return
 
-        top_text = "Top 10 Pemain:\n" + "\n".join([f"{i+1}. {user}: {score}" for i, (user, score) in enumerate(top_users)])
-        await message.reply_text(top_text)
+        db = Database('family100.db')
+        top_users = db.get_top_users()
+        db.close()
+
+        top_users_text = "Top 10 Pengguna:\n"
+        for idx, (user_name, score) in enumerate(top_users, start=1):
+            top_users_text += f"{idx}. {user_name}: {score} poin\n"
+
+        await message.reply_text(top_users_text)
 
     async def topgrup(self, client, message):
-        chat_id = message.chat.id
+        if await self.rate_limited(message.from_user.id):
+            return
 
-        async with self.locks['group_scores']:
-            if chat_id not in self.group_scores:
-                await message.reply_text("Tidak ada skor untuk grup ini.")
-                return
+        db = Database('family100.db')
+        top_groups = db.get_top_groups()
+        db.close()
 
-            top_users = sorted(self.group_scores[chat_id].items(), key=lambda item: item[1], reverse=True)[:10]
+        top_groups_text = "Top 10 Grup:\n"
+        for idx, (chat_id, total_score) in enumerate(top_groups, start=1):
+            top_groups_text += f"{idx}. Grup ID {chat_id}: {total_score} poin\n"
 
-        top_text = f"Top 10 Pemain di Grup ini:\n" + "\n".join([f"{i+1}. {user}: {score}" for i, (user, score) in enumerate(top_users)])
-        await message.reply_text(top_text)
+        await message.reply_text(top_groups_text)
 
     async def peraturan(self, client, message):
+        if await self.rate_limited(message.from_user.id):
+            return
+
         rules_text = (
-            "Aturan Bermain Super Family 100:\n"
-            "1. Mulai permainan dengan /mulai\n"
-            "2. Jawab pertanyaan yang diberikan\n"
-            "3. Dapatkan poin untuk jawaban yang benar\n"
-            "4. Gunakan /next untuk pertanyaan berikutnya\n"
-            "5. Gunakan /nyerah jika ingin menyerah\n"
+            "Peraturan Permainan Super Family 100:\n"
+            "1. Ketik /mulai untuk memulai permainan.\n"
+            "2. Setiap pertanyaan memiliki beberapa jawaban yang harus ditebak.\n"
+            "3. Ketik jawaban Anda dan bot akan memeriksa kebenarannya.\n"
+            "4. Ketik /nyerah untuk menyerah.\n"
+            "5. Ketik /next untuk mendapatkan pertanyaan berikutnya.\n"
+            "6. Poin akan diberikan berdasarkan jawaban yang benar."
         )
         await message.reply_text(rules_text)
 
     async def blacklist(self, client, message):
-        if str(message.from_user.id) != str(OWNER_ID):
+        if await self.rate_limited(message.from_user.id):
             return
 
-        args = message.text.split()
-        if len(args) < 2:
-            await message.reply_text("Penggunaan: /blacklist <user_id/group_id>")
+        if message.from_user.id != OWNER_ID:
+            await message.reply_text("Anda tidak memiliki izin untuk menggunakan perintah ini.")
             return
 
-        target_id = int(args[1])
+        if len(message.command) < 2:
+            await message.reply_text("ID pengguna atau ID grup tidak diberikan.")
+            return
+
+        try:
+            target_id = int(message.command[1])
+        except ValueError:
+            await message.reply_text("ID pengguna atau ID grup tidak valid.")
+            return
+
         if target_id < 0:
-            self.blacklisted_groups.add(target_id)
-            await message.reply_text(f"Grup {target_id} telah di-blacklist.")
+            async with self.locks['blacklisted_groups']:
+                self.blacklisted_groups.add(target_id)
+            await message.reply_text(f"Grup dengan ID {target_id} telah diblokir.")
         else:
-            self.blacklisted_users.add(target_id)
-            await message.reply_text(f"Pengguna {target_id} telah di-blacklist.")
+            async with self.locks['blacklisted_users']:
+                self.blacklisted_users.add(target_id)
+            await message.reply_text(f"Pengguna dengan ID {target_id} telah diblokir.")
 
     async def whitelist(self, client, message):
-        if str(message.from_user.id) != str(OWNER_ID):
+        if await self.rate_limited(message.from_user.id):
             return
 
-        args = message.text.split()
-        if len(args) < 2:
-            await message.reply_text("Penggunaan: /whitelist <user_id/group_id>")
+        if message.from_user.id != OWNER_ID:
+            await message.reply_text("Anda tidak memiliki izin untuk menggunakan perintah ini.")
             return
 
-        target_id = int(args[1])
+        if len(message.command) < 2:
+            await message.reply_text("ID pengguna atau ID grup tidak diberikan.")
+            return
+
+        try:
+            target_id = int(message.command[1])
+        except ValueError:
+            await message.reply_text("ID pengguna atau ID grup tidak valid.")
+            return
+
         if target_id < 0:
-            self.blacklisted_groups.discard(target_id)
-            await message.reply_text(f"Grup {target_id} telah di-whitelist.")
+            async with self.locks['blacklisted_groups']:
+                self.blacklisted_groups.discard(target_id)
+            await message.reply_text(f"Grup dengan ID {target_id} telah diizinkan kembali.")
         else:
-            self.blacklisted_users.discard(target_id)
-            await message.reply_text(f"Pengguna {target_id} telah di-whitelist.")
+            async with self.locks['blacklisted_users']:
+                self.blacklisted_users.discard(target_id)
+            await message.reply_text(f"Pengguna dengan ID {target_id} telah diizinkan kembali.")
 
     async def broadcast(self, client, message):
-        if str(message.from_user.id) != str(OWNER_ID):
+        if await self.rate_limited(message.from_user.id):
             return
 
-        broadcast_message = message.text.split(maxsplit=1)
-        if len(broadcast_message) < 2:
-            await message.reply_text("Penggunaan: /broadcast <pesan>")
+        if message.from_user.id != OWNER_ID:
+            await message.reply_text("Anda tidak memiliki izin untuk menggunakan perintah ini.")
             return
 
-        broadcast_text = broadcast_message[1]
+        broadcast_message = message.text.split(maxsplit=1)[1] if len(message.text.split(maxsplit=1)) > 1 else ""
+        if not broadcast_message:
+            await message.reply_text("Pesan tidak diberikan.")
+            return
 
         async with self.locks['registered_chats']:
             for chat_id in self.registered_chats:
                 try:
-                    await client.send_message(chat_id, broadcast_text)
+                    await client.send_message(chat_id, broadcast_message)
                 except Exception as e:
-                    logging.error(f"Error broadcasting to {chat_id}: {e}")
-
-        await message.reply_text("Pesan broadcast telah dikirim.")
+                    logging.error(f"Error broadcasting message to {chat_id}: {e}")
 
     def format_question(self, question, correct_answers, answerers):
-        formatted_answers = "\n".join([f"{ans} (Answered by: {', '.join(answers)})" if ans != "_" * len(ans) else ans for ans, answers in zip(correct_answers, answerers)])
-        formatted_question = question + "\n\n" + formatted_answers
+        formatted_question = f"Pertanyaan: {question}\n"
+        for i, (correct, users) in enumerate(zip(correct_answers, answerers), start=1):
+            users_text = ", ".join(users) if users else "Belum ada"
+            formatted_question += f"{i}. {correct} ({users_text})\n"
         return formatted_question
 
     def run(self):
