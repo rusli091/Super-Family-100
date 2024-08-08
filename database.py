@@ -7,34 +7,41 @@ class Database:
 
     def create_tables(self):
         with self.conn:
-            self.conn.execute('''CREATE TABLE IF NOT EXISTS user_scores (
-                                    username TEXT PRIMARY KEY,
-                                    score INTEGER
-                                )''')
-            self.conn.execute('''CREATE TABLE IF NOT EXISTS group_scores (
-                                    chat_id INTEGER,
-                                    username TEXT,
-                                    score INTEGER,
-                                    PRIMARY KEY (chat_id, username)
-                                )''')
-
-    def update_score(self, chat_id, username, score):
+            self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS scores (
+                chat_id INTEGER,
+                user_name TEXT,
+                score INTEGER
+            )
+            """)
+    
+    def update_score(self, chat_id, user_name, score):
         with self.conn:
-            self.conn.execute('INSERT OR REPLACE INTO user_scores (username, score) VALUES (?, COALESCE((SELECT score FROM user_scores WHERE username = ?), 0) + ?)', (username, username, score))
-            self.conn.execute('INSERT OR REPLACE INTO group_scores (chat_id, username, score) VALUES (?, ?, COALESCE((SELECT score FROM group_scores WHERE chat_id = ? AND username = ?), 0) + ?)', (chat_id, username, chat_id, username, score))
+            cur = self.conn.cursor()
+            cur.execute("SELECT score FROM scores WHERE chat_id=? AND user_name=?", (chat_id, user_name))
+            row = cur.fetchone()
+            if row:
+                new_score = row[0] + score
+                cur.execute("UPDATE scores SET score=? WHERE chat_id=? AND user_name=?", (new_score, chat_id, user_name))
+            else:
+                cur.execute("INSERT INTO scores (chat_id, user_name, score) VALUES (?, ?, ?)", (chat_id, user_name, score))
+            self.conn.commit()
 
-    def get_user_score(self, username):
-        with self.conn:
-            result = self.conn.execute('SELECT score FROM user_scores WHERE username = ?', (username,)).fetchone()
-            return result[0] if result else 0
+    def get_user_score(self, chat_id, user_name):
+        cur = self.conn.cursor()
+        cur.execute("SELECT score FROM scores WHERE chat_id=? AND user_name=?", (chat_id, user_name))
+        row = cur.fetchone()
+        return row[0] if row else 0
 
-    def get_group_scores(self, chat_id):
-        with self.conn:
-            return self.conn.execute('SELECT username, score FROM group_scores WHERE chat_id = ? ORDER BY score DESC', (chat_id,)).fetchall()
+    def get_top_users(self):
+        cur = self.conn.cursor()
+        cur.execute("SELECT user_name, score FROM scores ORDER BY score DESC LIMIT 10")
+        return cur.fetchall()
 
-    def get_top_users(self, limit=10):
-        with self.conn:
-            return self.conn.execute('SELECT username, score FROM user_scores ORDER BY score DESC LIMIT ?', (limit,)).fetchall()
+    def get_top_groups(self):
+        cur = self.conn.cursor()
+        cur.execute("SELECT chat_id, SUM(score) as total_score FROM scores GROUP BY chat_id ORDER BY total_score DESC LIMIT 10")
+        return cur.fetchall()
 
     def close(self):
         self.conn.close()
